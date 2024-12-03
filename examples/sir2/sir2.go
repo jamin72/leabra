@@ -374,7 +374,7 @@ func (ss *Sim) ConfigNet(net *leabra.Network) {
 	ss.ApplyParams()
 	net.InitWeights()
 }
-
+//Compute entropy dynamically and scale learning rate for each layer
 func (ss *Sim) ApplyParams() {
 	if ss.Loops != nil {
 		trn := ss.Loops.Stacks[etime.Train]
@@ -382,14 +382,33 @@ func (ss *Sim) ApplyParams() {
 		trn.Loops[etime.Epoch].Counter.Max = ss.Config.NEpochs
 	}
 	ss.Params.SetAll()
-
-	matg := ss.Net.LayerByName("MatrixGo")
-	matn := ss.Net.LayerByName("MatrixNoGo")
-
+	entropy := ss.ComputeEntropy()
+	matg := ss.Net.LayerByName("MatrixGo").(*leabra.Layer)
+	matn := ss.Net.LayerByName("MatrixNoGo").(*leabra.Layer)
+	rwpred := ss.Net.LayerByName("RWPred").(*leabra.Layer)
+if matg != nil {
 	matg.Matrix.BurstGain = ss.BurstDaGain
 	matg.Matrix.DipGain = ss.DipDaGain
+	matg.LrateMult(entropy)
+}
+if matn != nil {
 	matn.Matrix.BurstGain = ss.BurstDaGain
 	matn.Matrix.DipGain = ss.DipDaGain
+	matn.LrateMult(entropy)
+}
+
+if rwpred != nil {
+	rwpred.LrateMult(entropy)
+}
+
+if len(matg.RecvPaths) > 0 {
+    ss.Stats.SetFloat32("MatrixGoLRate", matg.RecvPaths[0].Learn.Lrate)
+}
+if len(matn.RecvPaths) > 0 {
+    ss.Stats.SetFloat32("MatrixNoGoLRate", matn.RecvPaths[0].Learn.Lrate)
+}
+if len(rwpred.RecvPaths) > 0 {
+    ss.Stats.SetFloat32("RWPredLRate", rwpred.RecvPaths[0].Learn.Lrate)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -575,6 +594,40 @@ func (ss *Sim) TestAll() {
 	ss.Loops.Mode = etime.Train // Important to reset Mode back to Train because this is called from within the Train Run.
 }
 
+func (ss *Sim) ComputeEntropy() float32 {
+    matGo := ss.Net.LayerByName("MatrixGo")
+    matNoGo := ss.Net.LayerByName("MatrixNoGo")
+    gpithal := ss.Net.LayerByName("GPiThal")
+
+    goVals := matGo.UnitVals("AvgM", 0)
+    nogoVals := matNoGo.UnitVals("AvgM", 0)
+
+    sumGo := float32(0)
+    for _, val := range goVals {
+        sumGo += val
+    }
+    sumNoGo := float32(0)
+    for _, val := range nogoVals {
+        sumNoGo += val
+    }
+
+    entropy := sumGo - sumNoGo
+    if entropy < 0.25 {
+        entropy = 0.25
+    } else if entropy > 4 {
+        entropy = 4
+    }
+
+    // Optional GPiThal component
+    gpithalVals := gpithal.UnitVals("AvgM", 0)
+    if len(gpithalVals) > 1 {
+        diff := math32.Abs(gpithalVals[0] - gpithalVals[1])
+        gpiEntropy := 4 - diff*3.2
+        entropy = (entropy + gpiEntropy) / 2
+    }
+    return entropy
+}
+
 ////////////////////////////////////////////////////////////////////////
 // 		Stats
 
@@ -636,6 +689,9 @@ func (ss *Sim) TrialStats() {
 	ss.Stats.SetFloat32("AbsDA", math32.Abs(snc.Neurons[0].Act))
 	rp := ss.Net.LayerByName("RWPred")
 	ss.Stats.SetFloat32("RewPred", rp.Neurons[0].Act)
+
+	entropy := ss.ComputeEntropy()
+	ss.Stats.SetFloat32("Entropy", entropy)
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -658,8 +714,9 @@ func (ss *Sim) ConfigLogs() {
 	ss.Logs.AddStatAggItem("DA", etime.Run, etime.Epoch, etime.Trial)
 	ss.Logs.AddStatAggItem("AbsDA", etime.Run, etime.Epoch, etime.Trial)
 	ss.Logs.AddStatAggItem("RewPred", etime.Run, etime.Epoch, etime.Trial)
+	ss.Logs.AddStatAggItem("Entropy", etime.Run, etime.Epoch, etime.Trial)
 
-	ss.Logs.PlotItems("PctErr", "AbsDA", "RewPred")
+	ss.Logs.PlotItems("PctErr", "AbsDA", "RewPred", "Entropy")
 
 	ss.Logs.CreateTables()
 	ss.Logs.SetContext(&ss.Stats, ss.Net)
